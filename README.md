@@ -10,6 +10,34 @@
 
 Networking interfaces. For now I'm adding a TAP interface I can understand
 
+## Debugging with VSCode
 
+To run with an ethernet interface you'll need to open VSCode as sudo with `--no-sandbox` option:
+```sh
+sudo code --user-data-dir ~/.config/Code --no-sandbox .
+```
+
+You may need to install the Go extension and Delve as sudo since you are opening VSCode as a different user.
+
+Creating a launch.json maps directly to using VSCode normally. Here's an example:
+<details>
+
+```json5
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Package",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/examples/mqtt/",
+            "args":["-i","wlp7s0"],
+        }
+    ]
+}
+```
+
+</details>
 
 
