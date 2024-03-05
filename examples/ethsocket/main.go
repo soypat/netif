@@ -2,13 +2,33 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"syscall"
+
+	"github.com/soypat/netif"
+	"github.com/soypat/netif/examples/common"
 )
 
 func main() {
 	ifname := os.Args[1]
+	dev, err := netif.NewEthSocket(ifname)
+	if err != nil {
+		log.Fatal("NewEthSocket:", err)
+	}
+	defer dev.Close()
+
+	dhcpc, stack, err := common.SetupWithDHCP(dev, common.SetupConfig{
+		Hostname: "myhost",
+		Logger:   slog.Default(),
+		UDPPorts: 1, // DNS
+		TCPPorts: 1, // TCP stuff.
+	})
+	if err != nil {
+		log.Fatal("SetupWithDHCP:", err)
+	}
+
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		log.Fatal("get link by name:", err)

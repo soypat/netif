@@ -2,4 +2,7 @@ module github.com/soypat/netif
 
 go 1.20
 
-require golang.org/x/sys v0.17.0
+require (
+	github.com/soypat/seqs v0.0.0-20240116042257-a699b4ea0e64
+	golang.org/x/sys v0.17.0
+)
