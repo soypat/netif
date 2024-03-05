@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"os/user"
 	"time"
 
@@ -37,6 +38,9 @@ var (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug - 4,
+	})))
 	u, _ := user.Current()
 	if u.Name == "" {
 		u.Name = "nobody"

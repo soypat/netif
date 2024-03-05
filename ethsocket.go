@@ -99,6 +99,7 @@ func (e *EthSocket) PollOne() (bool, error) {
 	ehdr.SizeOrEtherType = ef.Protocol
 	ehdr.Destination = e.hw6
 	ehdr.Put(e.buf)
+	err = e.ehandler(e.buf[:n])
 	return true, err
 }
 

@@ -247,7 +247,7 @@ func nicLoop(dev netif.InterfaceEthPoller, Stack *stacks.PortStack) {
 		for i := 0; i < 1; i++ {
 			gotPacket, err := dev.PollOne()
 			if err != nil {
-				println("poll error:", err.Error())
+				slog.Error("nic:PollOne", slog.String("err", err.Error()))
 			}
 			if !gotPacket {
 				break
@@ -264,7 +264,7 @@ func nicLoop(dev netif.InterfaceEthPoller, Stack *stacks.PortStack) {
 			buf := queue[i][:]
 			lenBuf[i], err = Stack.HandleEth(buf[:])
 			if err != nil {
-				println("stack error n(should be 0)=", lenBuf[i], "err=", err.Error())
+				slog.Error("nic:HandleEth", slog.String("err", err.Error()))
 				lenBuf[i] = 0
 				continue
 			}
@@ -293,7 +293,7 @@ func nicLoop(dev netif.InterfaceEthPoller, Stack *stacks.PortStack) {
 				retries[i]++
 				if retries[i] > maxRetriesBeforeDropping {
 					markSent(i)
-					println("dropped outgoing packet:", err.Error())
+					slog.Error("nic:drop-pkt", slog.String("err", err.Error()))
 				}
 			} else {
 				markSent(i)
