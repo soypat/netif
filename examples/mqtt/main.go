@@ -79,7 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatal("SetupWithDHCP:", err)
 	}
-
+	// stack.RecvEth()
 	routerhw, err := common.ResolveHardwareAddr(stack, dhcpc.Router())
 	if err != nil {
 		panic("router hwaddr resolving:" + err.Error())

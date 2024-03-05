@@ -88,17 +88,10 @@ func (e *EthSocket) PollOne() (bool, error) {
 	for i := range e.buf {
 		e.buf[i] = 0
 	}
-	n, from, err := syscall.Recvfrom(e.fd, e.buf, 0)
+	n, _, err := syscall.Recvfrom(e.fd, e.buf, 0)
 	if err != nil || n == 0 {
 		return n > 0, err
 	}
-	// Seqs requires the Ethernet header to be present in the data buffer.
-	var ehdr eth.EthernetHeader
-	ef := from.(*syscall.SockaddrLinklayer)
-	copy(ehdr.Source[:6], ef.Addr[:6])
-	ehdr.SizeOrEtherType = ef.Protocol
-	ehdr.Destination = e.hw6
-	ehdr.Put(e.buf)
 	err = e.ehandler(e.buf[:n])
 	return true, err
 }
