@@ -226,11 +226,18 @@ func nicLoop(dev netif.InterfaceEthPoller, Stack *stacks.PortStack) {
 		queueSize                = 3
 		maxRetriesBeforeDropping = 3
 	)
-	var queue [queueSize][mtu]byte
+	mtu := dev.MTU()
+	queuebuf := make([]byte, mtu*queueSize)
+	var queue [queueSize][]byte
+	for i := range queue {
+		queue[i] = queuebuf[i*mtu : (i+1)*mtu]
+	}
 	var lenBuf [queueSize]int
 	var retries [queueSize]int
 	markSent := func(i int) {
-		queue[i] = [mtu]byte{} // Not really necessary.
+		for j := range queue[i] {
+			queue[i][j] = 0
+		}
 		lenBuf[i] = 0
 		retries[i] = 0
 	}
@@ -238,7 +245,7 @@ func nicLoop(dev netif.InterfaceEthPoller, Stack *stacks.PortStack) {
 		stallRx := true
 		// Poll for incoming packets.
 		for i := 0; i < 1; i++ {
-			gotPacket, err := dev.TryPoll()
+			gotPacket, err := dev.PollOne()
 			if err != nil {
 				println("poll error:", err.Error())
 			}

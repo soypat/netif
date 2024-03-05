@@ -35,6 +35,7 @@ func NewEthSocket(interfaceName string) (*EthSocket, error) {
 		Ifindex: iface.Index,
 		Halen:   uint8(len(ethsock.hw6)),
 	}
+	ethsock.buf = make([]byte, iface.MTU)
 	ethsock.fd, err = syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(syscall.ETH_P_ALL)))
 	if err != nil {
 		return nil, err
