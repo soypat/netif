@@ -107,7 +107,7 @@ func SetupWithDHCP(dev netif.InterfaceEthPoller, cfg SetupConfig) (*stacks.DHCPC
 }
 
 // ResolveHardwareAddr obtains the hardware address of the given IP address.
-func ResolveHardwareAddr(stack *stacks.PortStack, ip netip.Addr) ([6]byte, error) {
+func ResolveHardwareAddr(stack *stacks.PortStack, ip netip.Addr, timeout time.Duration) ([6]byte, error) {
 	if !ip.IsValid() {
 		return [6]byte{}, errors.New("invalid ip")
 	}
@@ -117,14 +117,13 @@ func ResolveHardwareAddr(stack *stacks.PortStack, ip netip.Addr) ([6]byte, error
 	if err != nil {
 		return [6]byte{}, err
 	}
+	deadline := time.Now().Add(timeout)
 	time.Sleep(4 * time.Millisecond)
-	retries := 20 // ARP exchanges should be fast, don't wait too long for them.
-	for !arpc.IsDone() && retries > 0 {
-		retries--
-		if retries == 0 {
-			return [6]byte{}, errors.New("arp timed out")
-		}
+	for !arpc.IsDone() && time.Until(deadline) > 0 {
 		time.Sleep(20 * time.Millisecond)
+	}
+	if !arpc.IsDone() {
+		return [6]byte{}, errors.New("arp timed out")
 	}
 	_, hw, err := arpc.ResultAs6()
 	return hw, err
@@ -201,7 +200,7 @@ func (r *Resolver) LookupNetIP(host string) ([]netip.Addr, error) {
 }
 
 func (r *Resolver) updateDNSHWAddr() (err error) {
-	r.dnshwaddr, err = ResolveHardwareAddr(r.stack, r.dnsaddr)
+	r.dnshwaddr, err = ResolveHardwareAddr(r.stack, r.dnsaddr, 4*time.Second)
 	return err
 }
 
