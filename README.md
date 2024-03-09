@@ -32,7 +32,6 @@ Creating a launch.json maps directly to using VSCode normally. Here's an example
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/examples/mqtt/",
-            "args":["-i","wlp7s0"],
         }
     ]
 }

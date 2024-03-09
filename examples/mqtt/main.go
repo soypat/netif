@@ -45,9 +45,12 @@ func main() {
 	if u.Name == "" {
 		u.Name = "nobody"
 	}
-	iface, err := net.InterfaceByIndex(1)
+	iface, err := netif.DefaultInterface()
 	if err != nil {
-		iface = &net.Interface{Name: "eth0"}
+		iface, err = net.InterfaceByIndex(1)
+		if err != nil {
+			log.Fatal("no interfaces found:", err)
+		}
 	}
 	var (
 		flagNetInterfaceName = iface.Name

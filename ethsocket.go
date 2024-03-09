@@ -1,3 +1,5 @@
+//go:build unix
+
 package netif
 
 import (
@@ -8,6 +10,9 @@ import (
 
 	"github.com/soypat/seqs/eth"
 )
+
+// Compile time guarantee of interface implementation.
+var _ InterfaceEthPoller = (*EthSocket)(nil)
 
 type EthSocket struct {
 	fd  int
