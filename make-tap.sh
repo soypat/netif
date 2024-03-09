@@ -1,4 +1,15 @@
 # Must run as sudo
+echo "This program is for testing and can brick your internet connection. Are you sure you want to continue? (y/n)"
+RESPONSE=$(head -n1 -)
+if [ "$RESPONSE" != "y" ]; then
+    echo "Exiting..."
+    exit 1
+fi
+
+if [ $(id -u) -ne 0 ]; then
+    echo "This script must be run as root."
+    exit 1
+fi
 
 # Create the tap interface, name it tap0.
 ip tuntap add tap0 mode tap
