@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/netip"
 	"net/url"
@@ -143,9 +144,11 @@ func main() {
 		}
 	}
 
+	// Create the HTTP request data.
 	var req httpx.RequestHeader
 	req.SetRequestURI(URL.RequestURI())
 	req.SetMethod("GET")
+	req.SetHost(svHostname)
 	reqbytes := req.Header()
 
 	logger.Info("tcp:ready",
@@ -153,6 +156,7 @@ func main() {
 		slog.String("serveraddr", serverAddr.String()),
 	)
 	rxBuf := make([]byte, iface.MTU*8)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for {
 		time.Sleep(5 * time.Second)
 		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()))
@@ -160,7 +164,7 @@ func main() {
 		// Make sure to timeout the connection if it takes too long.
 		conn.SetDeadline(time.Now().Add(connTimeout))
 
-		err = conn.OpenDialTCP(clientAddr.Port(), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), 0x123456)
+		err = conn.OpenDialTCP(clientAddr.Port(), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
 		if err != nil {
 			closeConn("opening TCP: " + err.Error())
 			continue
