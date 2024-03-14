@@ -23,9 +23,14 @@ type SetupConfig struct {
 	UDPPorts uint16
 	// Number of TCP ports to open for the stack.
 	TCPPorts uint16
+	// DHCPTimeout is the maximum time to wait for DHCP to complete.
+	DHCPTimeout time.Duration
 }
 
 func SetupWithDHCP(dev netif.InterfaceEthPoller, cfg SetupConfig) (*stacks.DHCPClient, *stacks.PortStack, error) {
+	if cfg.DHCPTimeout <= 0 {
+		cfg.DHCPTimeout = 8 * time.Second
+	}
 	cfg.UDPPorts++ // Add extra UDP port for DHCP client.
 	logger := cfg.Logger
 	if logger == nil {
@@ -69,11 +74,12 @@ func SetupWithDHCP(dev netif.InterfaceEthPoller, cfg SetupConfig) (*stacks.DHCPC
 		return nil, stack, err
 	}
 	i := 0
+	deadline := time.Now().Add(cfg.DHCPTimeout)
 	for !dhcpClient.IsDone() {
 		i++
 		logger.Info("DHCP ongoing...")
 		time.Sleep(time.Second / 2)
-		if i > 15 {
+		if time.Until(deadline) <= 0 {
 			if !reqAddr.IsValid() {
 				return dhcpClient, stack, errors.New("DHCP did not complete and no static IP was requested")
 			}

@@ -28,11 +28,11 @@ const dnsTimeout = 4 * time.Second
 
 func main() {
 	var (
-		flagInterface string
-		serverPort    uint16
-		flagLogLevel  int
+		flagInterface   string
+		serverPort      uint16
+		flagLogLevel    int
+		flagRequestedIP string
 	)
-
 	// Create device interface.
 	iface, err := netif.DefaultInterface()
 	if err != nil {
@@ -42,6 +42,7 @@ func main() {
 		}
 	}
 	flag.StringVar(&flagInterface, "i", iface.Name, "Interface to use")
+	flag.StringVar(&flagRequestedIP, "d", "", "IP address to request by DHCP.")
 	flag.IntVar(&flagLogLevel, "l", int(slog.LevelInfo), "Log level")
 	flag.Parse()
 	if flag.NArg() > 1 {
@@ -89,10 +90,12 @@ func main() {
 		log.Fatal("ethernet socket:" + err.Error())
 	}
 	dhcpc, stack, err := common.SetupWithDHCP(ethsock, common.SetupConfig{
-		Hostname: ourHost,
-		Logger:   logger,
-		TCPPorts: 1, // For HTTP over TCP.
-		UDPPorts: 1, // For DNS.
+		Hostname:    ourHost,
+		Logger:      logger,
+		TCPPorts:    1, // For HTTP over TCP.
+		UDPPorts:    1, // For DNS.
+		RequestedIP: flagRequestedIP,
+		DHCPTimeout: 1500 * time.Millisecond,
 	})
 	if err != nil {
 		panic("setup DHCP:" + err.Error())
@@ -111,14 +114,17 @@ func main() {
 		serverAddr = addrs[0]
 	}
 
-	// Next resolve the router's hardware address.
-	routerhw, err := common.ResolveHardwareAddr(stack, dhcpc.Router(), dnsTimeout)
+	// We then resolve the hardware address of the server. O
+	dstHwaddr, err := common.ResolveHardwareAddr(stack, serverAddr, dnsTimeout)
 	if err != nil {
-		panic("router hwaddr resolving:" + err.Error())
+		dstHwaddr, err = common.ResolveHardwareAddr(stack, dhcpc.Router(), dnsTimeout)
+		if err != nil {
+			panic("router hwaddr resolving:" + err.Error())
+		}
 	}
 
 	// Start TCP server.
-	const clientPort = 80
+	const clientPort = 47000
 	clientAddr := netip.AddrPortFrom(stack.Addr(), clientPort)
 	conn, err := stacks.NewTCPConn(stack, stacks.TCPConnConfig{
 		TxBufSize: tcpBufSize(iface.MTU),
@@ -154,7 +160,7 @@ func main() {
 		// Make sure to timeout the connection if it takes too long.
 		conn.SetDeadline(time.Now().Add(connTimeout))
 
-		err = conn.OpenDialTCP(clientAddr.Port(), routerhw, netip.AddrPortFrom(serverAddr, serverPort), 0x123456)
+		err = conn.OpenDialTCP(clientAddr.Port(), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), 0x123456)
 		if err != nil {
 			closeConn("opening TCP: " + err.Error())
 			continue

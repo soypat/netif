@@ -43,6 +43,6 @@ local
 *.zip
 *.gz
 *.tar
-
+gurl
 # If running a python script.
 */__pycache__/*
