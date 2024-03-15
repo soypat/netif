@@ -68,6 +68,9 @@ func main() {
 		}
 		serverPort = uint16(p)
 	}
+	if serverPort == 0 {
+		serverPort = 80 // Sensible default if not present.
+	}
 
 	// Create structured logger.
 	fp, _ := os.Create("http-client.log")
@@ -159,11 +162,12 @@ func main() {
 	retries := 5
 	for retries > 0 {
 		retries--
-		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()))
+		ourPort := uint16(rng.Intn(0xffff-1025) + 1024)
+		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()), slog.Uint64("our-port", uint64(ourPort)))
 
 		// Make sure to timeout the connection if it takes too long.
 		conn.SetDeadline(time.Now().Add(connTimeout))
-		err = conn.OpenDialTCP(uint16(rng.Intn(0xffff-1025)+1024), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
+		err = conn.OpenDialTCP(ourPort, dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
 		if err != nil {
 			closeConn("opening TCP: " + err.Error())
 			continue
@@ -185,7 +189,7 @@ func main() {
 			closeConn("writing request: " + err.Error())
 			continue
 		}
-		time.Sleep(500 * time.Millisecond)
+		// time.Sleep(500 * time.Millisecond)
 		conn.SetDeadline(time.Now().Add(connTimeout))
 		n, err := conn.Read(rxBuf)
 		if n == 0 && err != nil {
