@@ -125,8 +125,6 @@ func main() {
 	}
 
 	// Start TCP server.
-	const clientPort = 47000
-	clientAddr := netip.AddrPortFrom(stack.Addr(), clientPort)
 	conn, err := stacks.NewTCPConn(stack, stacks.TCPConnConfig{
 		TxBufSize: tcpBufSize(iface.MTU),
 		RxBufSize: tcpBufSize(iface.MTU),
@@ -139,9 +137,10 @@ func main() {
 		slog.Error("tcpconn:closing", slog.String("err", err))
 		conn.Close()
 		for !conn.State().IsClosed() {
-			slog.Info("tcpconn:waiting", slog.String("state", conn.State().String()))
+			slog.Info("closeConn:waiting", slog.String("state", conn.State().String()))
 			time.Sleep(1000 * time.Millisecond)
 		}
+		time.Sleep(5 * time.Second)
 	}
 
 	// Create the HTTP request data.
@@ -152,19 +151,19 @@ func main() {
 	reqbytes := req.Header()
 
 	logger.Info("tcp:ready",
-		slog.String("clientaddr", clientAddr.String()),
+		slog.String("clientaddr", stack.Addr().String()),
 		slog.String("serveraddr", serverAddr.String()),
 	)
 	rxBuf := make([]byte, iface.MTU*8)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for {
-		time.Sleep(5 * time.Second)
+	retries := 5
+	for retries > 0 {
+		retries--
 		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()))
 
 		// Make sure to timeout the connection if it takes too long.
 		conn.SetDeadline(time.Now().Add(connTimeout))
-
-		err = conn.OpenDialTCP(clientAddr.Port(), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
+		err = conn.OpenDialTCP(uint16(rng.Intn(0xffff-1025)+1024), dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
 		if err != nil {
 			closeConn("opening TCP: " + err.Error())
 			continue
@@ -197,9 +196,12 @@ func main() {
 			continue
 		}
 		logger.Info("response", slog.String("response", string(rxBuf[:n])))
+		os.Stdout.Write(rxBuf[:n])
 		closeConn("done")
+		return
 	}
-
+	os.Stderr.Write([]byte("failed to connect to server\n"))
+	os.Exit(1)
 }
 
 func tcpBufSize(mtu int) uint16 {
