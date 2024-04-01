@@ -58,6 +58,7 @@ func (e *EthSocket) HardwareAddr6() ([6]byte, error) {
 func (e *EthSocket) SendEth(data []byte) error {
 	if len(data) < 14 {
 		log.Println("ethernet frame too short")
+		return errors.New("ethernet frame too short")
 	}
 	ehdr := eth.DecodeEthernetHeader(data)
 	e.sa.Protocol = ehdr.SizeOrEtherType
