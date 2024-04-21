@@ -79,6 +79,12 @@ type engineTCPConn struct {
 	conn        *stacks.TCPConn
 }
 
+// NewEngine returns a networking engine that uses the given network interface controller.
+// Engine facilitates:
+//   - DHCP handling for address, router, DNS servers, and other network parameters.
+//   - DNS resolution.
+//   - TCP connection handling.
+//   - ARP resolution (handled automatically)
 func NewEngine(nic InterfaceEthPoller, cfg EngineConfig) (*Engine, error) {
 	if nic == nil {
 		panic("nic is nil")
@@ -148,6 +154,25 @@ func NewEngine(nic InterfaceEthPoller, cfg EngineConfig) (*Engine, error) {
 	return e, nil
 }
 
+// WaitForDHCP waits for DHCP to complete. This should always be called after creating the engine with AddrMethodDHCP.
+func (e *Engine) WaitForDHCP(timeout time.Duration) error {
+	if e.method != AddrMethodDHCP {
+		return errors.New("not using DHCP")
+	}
+	err := e.waitDHCP(timeout)
+	if err != nil {
+		return err
+	}
+	e.consolidateResultsDHCP()
+	return nil
+}
+
+// Interface returns the underlying network interface controller.
+func (e *Engine) Interface() InterfaceEthPoller {
+	return e.nic
+}
+
+// Addr returns the IP address of the stack.
 func (e *Engine) Addr() netip.Addr {
 	return e.s.Addr()
 }
@@ -204,18 +229,6 @@ func (e *Engine) DialTCP(localport uint16, establishDeadline time.Time, raddr ne
 	return conn, nil
 }
 
-func (e *Engine) WaitDHCP(timeout time.Duration) error {
-	if e.method != AddrMethodDHCP {
-		return errors.New("not using DHCP")
-	}
-	err := e.waitDHCP(timeout)
-	if err != nil {
-		return err
-	}
-	e.consolidateResultsDHCP()
-	return nil
-}
-
 func (e *Engine) lockFreeTCPConn() *engineTCPConn {
 	for i := range e.tcpconns {
 		if e.tcpconns[i].conn == nil || e.tcpconns[i].conn.State().IsClosed() {
@@ -229,6 +242,8 @@ func (e *Engine) lockFreeTCPConn() *engineTCPConn {
 
 // ResolveHardwareAddr resolves the hardware address of an IP address:
 //   - If the IP address is in the cache, it is returned.
+//   - If the IP address is not on the local network, the router's hardware address is returned.
+//   - If the IP address is on the local network, an ARP request is sent and the resulting hardware address is returned.
 func (e *Engine) ResolveHardwareAddr(ip netip.Addr, timeout time.Duration) ([6]byte, error) {
 	if !ip.IsValid() {
 		return [6]byte{}, errors.New("invalid ip")
@@ -270,6 +285,7 @@ func (e *Engine) ResolveHardwareAddr(ip netip.Addr, timeout time.Duration) ([6]b
 	return hw, err
 }
 
+// HandlePoll polls the network interface for incoming packets and sends queued packets.
 func (e *Engine) HandlePoll() (received, sent int, err error) {
 	return e.poll()
 }
@@ -442,6 +458,7 @@ func (e *Engine) poll() (received, sent int, err error) {
 	return received, sent, err
 }
 
+// NewResolver returns a DNS client that uses the Engine's ARP and network stack.
 func (e *Engine) NewResolver(localport uint16, timeout time.Duration) Resolver {
 	d := stacks.NewDNSClient(&e.s, localport)
 	return &engineResolver{
@@ -457,6 +474,7 @@ type engineResolver struct {
 	timeout time.Duration
 }
 
+// LookupNetIP resolves the IP addresses of a hostname. It implements the [Resolver] interface.
 func (r *engineResolver) LookupNetIP(host string) ([]netip.Addr, error) {
 	var addrs []netip.Addr
 	return r.appendLookupNetIP(host, addrs)
@@ -480,6 +498,7 @@ func (r *engineResolver) appendLookupNetIP(host string, dst []netip.Addr) ([]net
 	if err != nil {
 		return dst, err
 	}
+	defer r.dns.Abort()
 
 	time.Sleep(5 * time.Millisecond)
 	retries := 100

@@ -125,7 +125,7 @@ func main() {
 		}
 	}()
 
-	err = engine.WaitDHCP(5 * time.Second)
+	err = engine.WaitForDHCP(5 * time.Second)
 	if err != nil {
 		log.Fatal("dhcp:" + err.Error())
 	}

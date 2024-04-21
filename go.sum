@@ -6,5 +6,7 @@ github.com/soypat/seqs v0.0.0-20240308030925-3034cafd7839 h1:ensb4+PYqFDdo728fPe
 github.com/soypat/seqs v0.0.0-20240308030925-3034cafd7839/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
 github.com/soypat/seqs v0.0.0-20240315041335-3dd1de606d2f h1:lONveayNmHEWUmDxfGnqd3Ww8/1QhQpwBoEXNyWZuBI=
 github.com/soypat/seqs v0.0.0-20240315041335-3dd1de606d2f/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
+github.com/soypat/seqs v0.0.0-20240421220819-60c7db9451e0 h1:BtFPCzuftncM7uAV8vgeVxJUupMoSmk9U5m8Xfihg7w=
+github.com/soypat/seqs v0.0.0-20240421220819-60c7db9451e0/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
 golang.org/x/sys v0.17.0 h1:25cE3gD+tdBA7lp7QfhuV+rJiE9YXTcS3VG1SqssI/Y=
 golang.org/x/sys v0.17.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=

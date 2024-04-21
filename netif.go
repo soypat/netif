@@ -27,7 +27,7 @@ type Interface interface {
 	// MTU returns the maximum transmission unit size.
 	MTU() int
 	// Notify to register callback for network events. May not be supported for certain devices.
-	NetNotify(cb func(Event)) error
+	// NetNotify(cb func(Event)) error
 }
 
 // InterfaceEthPoller is implemented by devices that send/receive ethernet packets.
@@ -37,7 +37,8 @@ type InterfaceEthPoller interface {
 	SendEth(pkt []byte) error
 	// RecvEthHandle sets recieve Ethernet packet callback function
 	RecvEthHandle(func(pkt []byte) error)
-	// PollOne tries to receive one Ethernet packet and returns true if one was
+	// PollOne tries to receive one Ethernet packet and returns true if
+	// a packet was received by the stack callback.
 	PollOne() (bool, error)
 }
 
