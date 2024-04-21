@@ -1,9 +1,17 @@
 package netif
 
 import (
+	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/netip"
+	"sync"
+	"time"
 
+	"github.com/soypat/seqs"
+	"github.com/soypat/seqs/eth/dhcp"
+	"github.com/soypat/seqs/eth/dns"
 	"github.com/soypat/seqs/stacks"
 )
 
@@ -19,16 +27,25 @@ const queueSize = 2
 const maxRetriesBeforeDropping = 1
 
 type Engine struct {
-	nic      InterfaceEthPoller
-	dnssv    []netip.Addr
-	gw       netip.Addr
-	prefix   netip.Prefix
-	dhcpc    stacks.DHCPClient
-	s        stacks.PortStack
-	log      *slog.Logger
-	queue    [queueSize][]byte
-	qlen     [queueSize]int
-	qretries [queueSize]int
+	nic        InterfaceEthPoller
+	dnssv      []netip.Addr
+	router     netip.Addr
+	routerHW   [6]byte
+	method     AddrMethod
+	netmask    uint8
+	prngstate  uint32
+	tcpbufsize int
+	prefix     netip.Prefix
+	hostname   string
+	dhcpStart  time.Time
+	dhcpc      stacks.DHCPClient
+	s          stacks.PortStack
+	log        *slog.Logger
+	tcpconns   []engineTCPConn
+	queue      [queueSize][]byte
+	qlen       [queueSize]int
+	qretries   [queueSize]int
+	cache      lruCache
 }
 
 type EngineConfig struct {
@@ -42,27 +59,50 @@ type EngineConfig struct {
 	// Address is used to request a specific DHCP address
 	// or set the address of the stack manually.
 	Address netip.Addr
-	// Gateway manually sets the IP address of the router
-	// that can send packets out of the physical network and omits getting
-	// the Gateway over DHCP.
-	Gateway netip.Addr
+	// Router manually sets the IP address of the default gateway, which allows
+	// sending packets out of the physical network and omits getting
+	// the Router over DHCP.
+	Router netip.Addr
 	// DNSServers manually sets the DNS servers and omits getting them over DHCP.
 	DNSServers []netip.Addr
 	Logger     *slog.Logger
+	// Hostname is the hostname to request over DHCP.
+	Hostname string
+	// TCPBufferSize is the size of the buffer for TCP connections for both
+	// send and receive buffers, in bytes. If zero a sensible value is used.
+	TCPBuffersize int
 }
 
-func NewEngine(nic InterfaceEthPoller, cfg EngineConfig) *Engine {
+type engineTCPConn struct {
+	mu          sync.Mutex
+	initialized bool
+	conn        *stacks.TCPConn
+}
+
+func NewEngine(nic InterfaceEthPoller, cfg EngineConfig) (*Engine, error) {
 	if nic == nil {
 		panic("nic is nil")
+	} else if cfg.AddrMethod != AddrMethodManual && cfg.AddrMethod != AddrMethodDHCP {
+		return nil, errors.New("invalid address method")
+	} else if cfg.TCPBuffersize < 0 || cfg.TCPBuffersize > 65535 {
+		return nil, errors.New("invalid tcp buffer size")
+	} else if cfg.AddrMethod == AddrMethodManual && !cfg.Address.IsValid() {
+		return nil, errors.New("invalid address")
 	}
 	mac, err := nic.HardwareAddr6()
 	if err != nil {
-		println("mac get failed")
-		panic(err)
+		return nil, err
 	}
 	mtu := nic.MTU()
 	if mtu < 536 {
-		panic("small MTU")
+		return nil, errors.New("mtu too small")
+	}
+	if cfg.AddrMethod != AddrMethodManual {
+		cfg.MaxOpenPortsUDP += 1 // Add extra UDP port for DHCP client.
+	}
+	if cfg.TCPBuffersize == 0 {
+		// 40 is the length of a Ethernet+IP+TCP header, no options.
+		cfg.TCPBuffersize = 2 * (mtu - 40)
 	}
 	s := stacks.NewPortStack(stacks.PortStackConfig{
 		MaxOpenPortsUDP: int(cfg.MaxOpenPortsUDP),
@@ -71,18 +111,270 @@ func NewEngine(nic InterfaceEthPoller, cfg EngineConfig) *Engine {
 		MAC:             mac,
 		MTU:             uint16(mtu),
 	})
-
 	e := &Engine{
-		nic: nic,
-		s:   *s,
+		nic:        nic,
+		method:     cfg.AddrMethod,
+		s:          *s,
+		dnssv:      cfg.DNSServers,
+		router:     cfg.Router,
+		log:        cfg.Logger,
+		netmask:    cfg.Netmask,
+		hostname:   cfg.Hostname,
+		tcpconns:   make([]engineTCPConn, cfg.MaxOpenPortsTCP),
+		tcpbufsize: cfg.TCPBuffersize,
+		prngstate:  uint32(time.Now().UnixNano()),
 	}
+	nic.RecvEthHandle(e.s.RecvEth)
+
 	queuebuf := make([]byte, mtu*queueSize)
-	// var queue [queueSize][]byte
 	for i := range e.queue {
 		e.queue[i] = queuebuf[i*mtu : (i+1)*mtu]
 	}
 
-	return e
+	switch cfg.AddrMethod {
+	case AddrMethodManual:
+		s.SetAddr(cfg.Address)
+	case AddrMethodDHCP:
+		err = e.startDHCP(stacks.DHCPRequestConfig{
+			Hostname:      e.hostname,
+			RequestedAddr: cfg.Address,
+			Xid:           e.prng32(),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return e, nil
+}
+
+func (e *Engine) Addr() netip.Addr {
+	return e.s.Addr()
+}
+
+// DialTCP creates a new TCP connection to the remote address raddr.
+func (e *Engine) DialTCP(localport uint16, establishDeadline time.Time, raddr netip.AddrPort) (net.Conn, error) {
+	if len(e.tcpconns) == 0 {
+		return nil, errors.New("no tcp connections available")
+	} else if e.Addr().BitLen() != raddr.Addr().BitLen() {
+		return nil, errors.New("network must be the same as remote address network (v4/v6)")
+	} else if !raddr.IsValid() {
+		return nil, errors.New("invalid remote address")
+	}
+
+	// Early check for available TCP connections.
+	econn := e.lockFreeTCPConn()
+	if econn == nil {
+		return nil, errors.New("no tcp connections available")
+	}
+	defer econn.mu.Unlock()
+
+	// TCP connection(s) available, resolve address if necessary.
+	addr := raddr.Addr()
+	hw, err := e.ResolveHardwareAddr(addr, 1*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	conn := econn.conn
+	if !econn.initialized {
+		conn, err = stacks.NewTCPConn(&e.s, stacks.TCPConnConfig{
+			TxBufSize: uint16(e.tcpbufsize),
+			RxBufSize: uint16(e.tcpbufsize),
+		})
+		if err != nil {
+			return nil, err
+		}
+		econn.conn = conn
+		econn.initialized = true
+	}
+
+	err = conn.OpenDialTCP(localport, hw, raddr, seqs.Value(e.prng32()))
+	if err != nil {
+		return nil, err
+	}
+	backoff := e.backoff()
+	deadlineDisabled := establishDeadline.IsZero()
+	for (deadlineDisabled || time.Since(establishDeadline) < 0) && conn.State().IsPreestablished() {
+		backoff.Miss()
+	}
+	if conn.State().IsPreestablished() {
+		conn.Close()
+		return nil, errors.New("tcp dial timed out")
+	}
+	return conn, nil
+}
+
+func (e *Engine) WaitDHCP(timeout time.Duration) error {
+	if e.method != AddrMethodDHCP {
+		return errors.New("not using DHCP")
+	}
+	err := e.waitDHCP(timeout)
+	if err != nil {
+		return err
+	}
+	e.consolidateResultsDHCP()
+	return nil
+}
+
+func (e *Engine) lockFreeTCPConn() *engineTCPConn {
+	for i := range e.tcpconns {
+		if e.tcpconns[i].conn == nil || e.tcpconns[i].conn.State().IsClosed() {
+			if e.tcpconns[i].mu.TryLock() {
+				return &e.tcpconns[i]
+			}
+		}
+	}
+	return nil
+}
+
+// ResolveHardwareAddr resolves the hardware address of an IP address:
+//   - If the IP address is in the cache, it is returned.
+func (e *Engine) ResolveHardwareAddr(ip netip.Addr, timeout time.Duration) ([6]byte, error) {
+	if !ip.IsValid() {
+		return [6]byte{}, errors.New("invalid ip")
+	}
+	// Check cache.
+	if entry := e.cache.getByAddr(ip); entry != nil {
+		return entry.hw, nil
+	}
+
+	// Check if address is not on the local network.
+	if !e.prefix.IsValid() {
+		return [6]byte{}, errors.New("netmask/prefix undefined")
+	}
+	if !e.prefix.Contains(ip) {
+		// IP address is not on the local network, return the router's hardware address.
+		if err := e.ensureRouterAddr(); err != nil {
+			return [6]byte{}, err
+		}
+		return e.routerHW, nil
+	}
+
+	arpc := e.s.ARP()
+	arpc.Abort() // Remove any previous ARP requests.
+	err := arpc.BeginResolve(ip)
+	if err != nil {
+		return [6]byte{}, err
+	}
+
+	deadline := time.Now().Add(timeout)
+	backoff := e.backoff()
+	for !arpc.IsDone() && time.Until(deadline) > 0 {
+		backoff.Miss()
+	}
+	if !arpc.IsDone() {
+		return [6]byte{}, errors.New("arp timed out")
+	}
+	_, hw, err := arpc.ResultAs6()
+	e.cache.enter("", ip, hw)
+	return hw, err
+}
+
+func (e *Engine) HandlePoll() (received, sent int, err error) {
+	return e.poll()
+}
+
+func (e *Engine) startDHCP(cfg stacks.DHCPRequestConfig) error {
+	if !e.dhcpc.Offer().IsValid() {
+		// Initialize DHCP client if not already done.
+		dhcpClient := stacks.NewDHCPClient(&e.s, dhcp.DefaultClientPort)
+		e.dhcpc = *dhcpClient
+	}
+	// Perform DHCP request.
+	dhcpc := &e.dhcpc
+	err := dhcpc.BeginRequest(cfg)
+	return err
+}
+
+// doDHCP shows use of DHCP methods together to fulfill a DHCP request.
+func (e *Engine) doDHCP(timeout time.Duration, cfg stacks.DHCPRequestConfig) error {
+	err := e.startDHCP(cfg)
+	if err != nil {
+		return err
+	}
+	err = e.waitDHCP(timeout)
+	if err != nil {
+		return err
+	}
+	e.consolidateResultsDHCP()
+	return nil
+}
+
+func (e *Engine) waitDHCP(timeout time.Duration) error {
+	if e.method != AddrMethodDHCP {
+		return errors.New("not using DHCP")
+	}
+	dhcpc := &e.dhcpc
+	defer dhcpc.Abort()
+
+	e.dhcpStart = time.Now()
+	deadline := e.dhcpStart.Add(timeout)
+	backoff := e.backoff()
+	for !dhcpc.IsDone() && time.Since(deadline) < 0 {
+		backoff.Miss()
+	}
+	// close port.
+	if !dhcpc.IsDone() {
+		e.dhcpStart = time.Time{}
+		return errors.New("DHCP did not complete")
+	}
+	return nil
+}
+
+func (e *Engine) consolidateResultsDHCP() {
+	var err error
+	dhcpc := &e.dhcpc
+	offer := dhcpc.Offer()
+	if offer.IsValid() && (e.method == AddrMethodDHCP || !e.s.Addr().IsValid()) {
+		e.s.SetAddr(offer)
+	}
+	router := dhcpc.Router()
+	if router.IsValid() && (e.method == AddrMethodDHCP && router.IsValid() || !e.router.IsValid()) {
+		e.router = router
+	}
+	if e.method == AddrMethodDHCP || len(e.dnssv) == 0 {
+		e.dnssv = dhcpc.DNSServers()
+	}
+	cidr := dhcpc.CIDRBits()
+	cidrValid := cidr > 0 && cidr < 32
+	if cidrValid && (e.method == AddrMethodDHCP || !e.prefix.IsValid()) {
+		e.prefix, err = e.router.Prefix(int(cidr))
+		if err != nil {
+			e.prefix = netip.Prefix{}
+		}
+	}
+	if e.log != nil {
+		e.log.LogAttrs(context.Background(), slog.LevelInfo,
+			"dhcp-complete",
+			slog.String("our-ip", e.s.Addr().String()),
+			slog.String("dns", e.dnssv[0].String()),
+			slog.String("router", e.router.String()),
+			slog.String("prefix", e.prefix.String()),
+			slog.String("broadcast", dhcpc.BroadcastAddr().String()),
+		)
+	}
+}
+
+func (e *Engine) ensureRouterAddr() error {
+	if e.router.IsValid() && e.routerHW != [6]byte{} {
+		return nil
+	} else if e.method == AddrMethodManual {
+		return errors.New("gateway not set")
+	}
+
+	gw, err := e.ResolveHardwareAddr(e.router, 1*time.Second)
+	if err != nil {
+		return err
+	}
+	e.routerHW = gw
+	return nil
+}
+
+func (e *Engine) ensureDNSAddr() error {
+	if len(e.dnssv) == 0 {
+		return errors.New("no dns servers")
+	}
+	return nil
 }
 
 func (e *Engine) markPktSent(i int) {
@@ -96,15 +388,17 @@ func (e *Engine) markPktSent(i int) {
 }
 
 // persistentNICLoop is called once on Engine creation and runs throughout the engine's life (for now forever).
-func (e *Engine) poll() (gotPacket, sentPacket bool, err error) {
+func (e *Engine) poll() (received, sent int, err error) {
 	nic := e.nic
-	stack := e.s
+	stack := &e.s
 
 	// Poll for incoming packets.
 	var errGot, errSent error
 	// RXPOLL:
-	gotPacket, errGot = nic.PollOne()
-
+	gotPacket, errGot := nic.PollOne()
+	if gotPacket {
+		received++
+	}
 	for i := range e.queue {
 		if e.qretries[i] != 0 {
 			continue // Packet currently queued for retransmission.
@@ -136,14 +430,213 @@ func (e *Engine) poll() (gotPacket, sentPacket bool, err error) {
 				}
 			} else {
 				e.markPktSent(i)
+				sent++
 			}
 		}
 	}
-	sentPacket = !stallTx
 	if errGot != nil {
 		err = errGot
 	} else {
 		err = errSent
 	}
-	return gotPacket, sentPacket, err
+	return received, sent, err
+}
+
+func (e *Engine) NewResolver(localport uint16, timeout time.Duration) Resolver {
+	d := stacks.NewDNSClient(&e.s, localport)
+	return &engineResolver{
+		e:       e,
+		dns:     d,
+		timeout: timeout,
+	}
+}
+
+type engineResolver struct {
+	e       *Engine
+	dns     *stacks.DNSClient
+	timeout time.Duration
+}
+
+func (r *engineResolver) LookupNetIP(host string) ([]netip.Addr, error) {
+	var addrs []netip.Addr
+	return r.appendLookupNetIP(host, addrs)
+}
+
+// appendLookupNetIP is a helper function that appends the resolved IP addresses to the given slice to let user avoid allocations.
+func (r *engineResolver) appendLookupNetIP(host string, dst []netip.Addr) ([]netip.Addr, error) {
+	name, err := dns.NewName(host)
+	if err != nil {
+		return dst, err
+	}
+	err = r.e.ensureRouterAddr()
+	if err != nil {
+		return dst, err
+	}
+	err = r.e.ensureDNSAddr()
+	if err != nil {
+		return dst, err
+	}
+	err = r.dns.StartResolve(r.dnsConfig(name))
+	if err != nil {
+		return dst, err
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	retries := 100
+	for retries > 0 {
+		done, _ := r.dns.IsDone()
+		if done {
+			break
+		}
+		retries--
+		time.Sleep(20 * time.Millisecond)
+	}
+	done, rcode := r.dns.IsDone()
+	if !done && retries == 0 {
+		return dst, errors.New("dns lookup timed out")
+	} else if rcode != dns.RCodeSuccess {
+		return dst, errors.New("dns lookup failed:" + rcode.String())
+	}
+	answers := r.dns.Answers()
+	if len(answers) == 0 {
+		return dst, errors.New("no dns answers")
+	}
+	var foundIPv4 bool
+	for i := range answers {
+		data := answers[i].RawData()
+		if len(data) == 4 {
+			foundIPv4 = true
+			dst = append(dst, netip.AddrFrom4([4]byte(data)))
+		} else if len(data) == 16 {
+			dst = append(dst, netip.AddrFrom16([16]byte(data)))
+		}
+	}
+	if !foundIPv4 {
+		return dst, errors.New("no ipv4 dns answers")
+	}
+	return dst, nil
+}
+
+func (r *engineResolver) dnsConfig(name dns.Name) stacks.DNSResolveConfig {
+	return stacks.DNSResolveConfig{
+		Questions: []dns.Question{
+			{
+				Name:  name,
+				Type:  dns.TypeA,
+				Class: dns.ClassINET,
+			},
+		},
+		DNSAddr:         r.e.dnssv[0],
+		DNSHWAddr:       r.e.routerHW,
+		EnableRecursion: true,
+	}
+}
+
+func (e *Engine) backoff() exponentialBackoff {
+	return newBackoff()
+}
+
+func newBackoff() exponentialBackoff {
+	return exponentialBackoff{
+		MaxWait: 500 * time.Millisecond,
+	}
+}
+
+// exponentialBackoff implements a [Exponential Backoff]
+// delay algorithm to prevent saturation network or processor
+// with failing tasks. An exponentialBackoff with a non-zero MaxWait is ready for use.
+//
+// [Exponential Backoff]: https://en.wikipedia.org/wiki/Exponential_backoff
+type exponentialBackoff struct {
+	// Wait defines the amount of time that Miss will wait on next call.
+	Wait time.Duration
+	// Maximum allowable value for Wait.
+	MaxWait time.Duration
+	// StartWait is the value that Wait takes after a call to Hit.
+	StartWait time.Duration
+	// ExpMinusOne is the shift performed on Wait minus one, so the zero value performs a shift of 1.
+	ExpMinusOne uint32
+}
+
+// Hit sets eb.Wait to the StartWait value.
+func (eb *exponentialBackoff) Hit() {
+	if eb.MaxWait == 0 {
+		panic("MaxWait cannot be zero")
+	}
+	eb.Wait = eb.StartWait
+}
+
+// Miss sleeps for eb.Wait and increases eb.Wait exponentially.
+func (eb *exponentialBackoff) Miss() {
+	const k = 1
+	wait := eb.Wait
+	maxWait := eb.MaxWait
+	exp := eb.ExpMinusOne + 1
+	if maxWait == 0 {
+		panic("MaxWait cannot be zero")
+	}
+	time.Sleep(wait)
+	wait |= time.Duration(k)
+	wait <<= exp
+	if wait > maxWait {
+		wait = maxWait
+	}
+	eb.Wait = wait
+}
+
+type lruCache struct {
+	entries [8]lruEntry
+}
+
+type lruEntry struct {
+	// name is a index. not guaranteed to be present.
+	name string
+	// addr is the IP address.
+	addr netip.Addr
+	// hw is the hardware address.
+	hw [6]byte
+	// entered is set when the entry is created. If zero the entry is not in use.
+	entered time.Time
+}
+
+func (c *lruCache) getByName(name string) *lruEntry {
+	for i := range c.entries {
+		if c.entries[i].name == name {
+			return &c.entries[i]
+		}
+	}
+	return nil
+}
+
+func (c *lruCache) getByAddr(addr netip.Addr) *lruEntry {
+	for i := range c.entries {
+		if c.entries[i].addr.Compare(addr) == 0 {
+			return &c.entries[i]
+		}
+	}
+	return nil
+}
+
+func (c *lruCache) enter(name string, addr netip.Addr, hw [6]byte) {
+	var oldest *lruEntry = &c.entries[0]
+	for i := 1; i < len(c.entries) && !oldest.entered.IsZero(); i++ {
+		runnerup := &c.entries[i]
+		if runnerup.entered.Before(oldest.entered) {
+			oldest = runnerup
+		}
+	}
+	oldest.name = name
+	oldest.addr = addr
+	oldest.hw = hw
+	oldest.entered = time.Now()
+}
+
+func (e *Engine) prng32() uint32 {
+	/* Algorithm "xor" from p. 4 of Marsaglia, "Xorshift RNGs" */
+	p := e.prngstate
+	p ^= p << 13
+	p ^= p >> 17
+	p ^= p << 5
+	e.prngstate = p
+	return p
 }

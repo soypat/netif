@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/netip"
 	"net/url"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/soypat/netif"
-	"github.com/soypat/netif/examples/common"
 	"github.com/soypat/seqs"
 	"github.com/soypat/seqs/eth/dns"
 	"github.com/soypat/seqs/httpx"
@@ -26,6 +24,7 @@ const connTimeout = 5 * time.Second
 
 const ourHost = "gurl"
 const dnsTimeout = 4 * time.Second
+const arpTimeout = 1 * time.Second
 
 func main() {
 	var (
@@ -93,57 +92,52 @@ func main() {
 	if err != nil {
 		log.Fatal("ethernet socket:" + err.Error())
 	}
-	dhcpc, stack, err := common.SetupWithDHCP(ethsock, common.SetupConfig{
-		Hostname:    ourHost,
-		Logger:      logger,
-		TCPPorts:    1, // For HTTP over TCP.
-		UDPPorts:    1, // For DNS.
-		RequestedIP: flagRequestedIP,
-		DHCPTimeout: 1500 * time.Millisecond,
+
+	engine, err := netif.NewEngine(ethsock, netif.EngineConfig{
+		MaxOpenPortsUDP: 1,
+		MaxOpenPortsTCP: 1,
+		Logger:          logger,
+		Hostname:        ourHost,
+		AddrMethod:      netif.AddrMethodDHCP,
 	})
 	if err != nil {
-		panic("setup DHCP:" + err.Error())
+		log.Fatal("netif.Engine create:" + err.Error())
+	}
+
+	go func() {
+		stalled := 0
+		for {
+			rx, tx, err := engine.HandlePoll()
+			if err != nil {
+				log.Println("engine poll:" + err.Error())
+			}
+			if rx == 0 && tx == 0 {
+				// Exponential backoff.
+				stalled += 1
+				sleep := time.Duration(1) << stalled
+				if sleep > 1*time.Second {
+					sleep = 1 * time.Second
+				}
+				time.Sleep(sleep)
+			} else {
+				stalled = 0
+			}
+		}
+	}()
+
+	err = engine.WaitDHCP(5 * time.Second)
+	if err != nil {
+		log.Fatal("dhcp:" + err.Error())
 	}
 
 	if ipErr != nil {
 		// We have a hostname we must resolve.
-		resolver, err := common.NewResolver(stack, dhcpc)
-		if err != nil {
-			panic("resolver create:" + err.Error())
-		}
+		resolver := engine.NewResolver(dns.ClientPort, dnsTimeout)
 		addrs, err := resolver.LookupNetIP(URL.Host)
 		if err != nil {
 			panic("DNS lookup failed:" + err.Error())
 		}
 		serverAddr = addrs[0]
-	}
-
-	// We then resolve the hardware address of the server. O
-	dstHwaddr, err := common.ResolveHardwareAddr(stack, serverAddr, dnsTimeout)
-	if err != nil {
-		dstHwaddr, err = common.ResolveHardwareAddr(stack, dhcpc.Router(), dnsTimeout)
-		if err != nil {
-			panic("router hwaddr resolving:" + err.Error())
-		}
-	}
-
-	// Start TCP server.
-	conn, err := stacks.NewTCPConn(stack, stacks.TCPConnConfig{
-		TxBufSize: tcpBufSize(iface.MTU),
-		RxBufSize: tcpBufSize(iface.MTU),
-	})
-	if err != nil {
-		panic("conn create:" + err.Error())
-	}
-
-	closeConn := func(err string) {
-		slog.Error("tcpconn:closing", slog.String("err", err))
-		conn.Close()
-		for !conn.State().IsClosed() {
-			slog.Info("closeConn:waiting", slog.String("state", conn.State().String()))
-			time.Sleep(1000 * time.Millisecond)
-		}
-		time.Sleep(5 * time.Second)
 	}
 
 	// Create the HTTP request data.
@@ -153,61 +147,40 @@ func main() {
 	req.SetHost(svHostname)
 	reqbytes := req.Header()
 
-	logger.Info("tcp:ready",
-		slog.String("clientaddr", stack.Addr().String()),
-		slog.String("serveraddr", serverAddr.String()),
-	)
 	rxBuf := make([]byte, iface.MTU*8)
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	retries := 5
+	ourPort := uint16(12345)
 	for retries > 0 {
 		retries--
-		ourPort := uint16(rng.Intn(0xffff-1025) + 1024)
 		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()), slog.Uint64("our-port", uint64(ourPort)))
-
-		// Make sure to timeout the connection if it takes too long.
-		conn.SetDeadline(time.Now().Add(connTimeout))
-		err = conn.OpenDialTCP(ourPort, dstHwaddr, netip.AddrPortFrom(serverAddr, serverPort), seqs.Value(rng.Intn(0xffff_ffff-2)+1))
+		netconn, err := engine.DialTCP(ourPort, time.Now().Add(connTimeout), netip.AddrPortFrom(serverAddr, serverPort))
 		if err != nil {
-			closeConn("opening TCP: " + err.Error())
-			continue
+			panic("conn create:" + err.Error())
 		}
-		retries := 50
-		for conn.State() != seqs.StateEstablished && retries > 0 {
-			time.Sleep(100 * time.Millisecond)
-			retries--
+		conn := netconn.(*stacks.TCPConn)
+		if conn.State() != seqs.StateEstablished {
+			panic("conn state:" + conn.State().String())
 		}
-		conn.SetDeadline(time.Time{}) // Disable the deadline.
-		if retries == 0 {
-			closeConn("tcp establish retry limit exceeded")
-			continue
-		}
-
 		// Send the request.
 		_, err = conn.Write(reqbytes)
 		if err != nil {
-			closeConn("writing request: " + err.Error())
+			log.Println("writing request:" + err.Error())
 			continue
 		}
 		// time.Sleep(500 * time.Millisecond)
 		conn.SetDeadline(time.Now().Add(connTimeout))
 		n, err := conn.Read(rxBuf)
 		if n == 0 && err != nil {
-			closeConn("reading response: " + err.Error())
+			log.Println("reading response:" + err.Error())
 			continue
 		} else if n == 0 {
-			closeConn("no response")
+			log.Println("no response:" + err.Error())
 			continue
 		}
 		logger.Info("response", slog.String("response", string(rxBuf[:n])))
 		os.Stdout.Write(rxBuf[:n])
-		closeConn("done")
 		return
 	}
 	os.Stderr.Write([]byte("failed to connect to server\n"))
 	os.Exit(1)
-}
-
-func tcpBufSize(mtu int) uint16 {
-	return uint16(mtu - 40)
 }

@@ -1,6 +1,9 @@
 package netif
 
-import "net"
+import (
+	"net"
+	"net/netip"
+)
 
 type Event uint8
 
@@ -36,4 +39,10 @@ type InterfaceEthPoller interface {
 	RecvEthHandle(func(pkt []byte) error)
 	// PollOne tries to receive one Ethernet packet and returns true if one was
 	PollOne() (bool, error)
+}
+
+// Resolver is the interface for DNS resolution, as implemented by the `net` package.
+type Resolver interface {
+	// LookupNetIP returns the IP addresses of a host.
+	LookupNetIP(host string) ([]netip.Addr, error)
 }
