@@ -75,7 +75,7 @@ func SetupWithDHCP(dev netif.InterfaceEthPoller, cfg SetupConfig) (*stacks.DHCPC
 	}
 	i := 0
 	deadline := time.Now().Add(cfg.DHCPTimeout)
-	for !dhcpClient.IsDone() {
+	for dhcpClient.State() != dhcp.StateBound {
 		i++
 		logger.Info("DHCP ongoing...")
 		time.Sleep(time.Second / 2)

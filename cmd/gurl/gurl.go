@@ -5,12 +5,14 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/soypat/netif"
@@ -32,6 +34,8 @@ func main() {
 		serverPort      uint16
 		flagLogLevel    int
 		flagRequestedIP string
+		flagDNS         string
+		flagLocalport   int
 	)
 	// Create device interface.
 	iface, err := netif.DefaultInterface()
@@ -41,12 +45,16 @@ func main() {
 			log.Fatal("no interfaces found:", err)
 		}
 	}
+	flag.IntVar(&flagLocalport, "hostport", 8877, "Outgoing TCP port.")
+	flag.StringVar(&flagDNS, "dns", "", "DNS IP to seek.")
 	flag.StringVar(&flagInterface, "i", iface.Name, "Interface to use")
-	flag.StringVar(&flagRequestedIP, "d", "", "IP address to request by DHCP.")
+	flag.StringVar(&flagRequestedIP, "hostip", "", "IP address to request by DHCP.")
 	flag.IntVar(&flagLogLevel, "l", int(slog.LevelInfo), "Log level")
 	flag.Parse()
 	if flag.NArg() > 1 {
 		log.Fatal("too many arguments")
+	} else if flagLocalport < 1 || flagLocalport > math.MaxUint16 {
+		log.Fatal("invalid port ", flagLocalport)
 	}
 
 	// Parse URL and validate it.
@@ -92,13 +100,21 @@ func main() {
 	if err != nil {
 		log.Fatal("ethernet socket:" + err.Error())
 	}
-
+	var DNSServers []netip.Addr
+	if flagDNS != "" {
+		ip, err := netip.ParseAddr(flagDNS)
+		if err != nil {
+			log.Fatal("failed to parse dns flag:", err.Error())
+		}
+		DNSServers = append(DNSServers, ip)
+	}
 	engine, err := netif.NewEngine(ethsock, netif.EngineConfig{
 		MaxOpenPortsUDP: 1,
 		MaxOpenPortsTCP: 1,
 		Logger:          logger,
 		Hostname:        ourHost,
 		AddrMethod:      netif.AddrMethodDHCP,
+		DNSServers:      DNSServers,
 	})
 	if err != nil {
 		log.Fatal("netif.Engine create:" + err.Error())
@@ -146,10 +162,20 @@ func main() {
 	req.SetMethod("GET")
 	req.SetHost(svHostname)
 	reqbytes := req.Header()
+	// Reserve the underlying Linux socket so that
+	// the kernel does not reset the connection automatically.
+
+	// Bind TCP socket so underlying OS does not reset the connection.
+	// https://widu.tumblr.com/post/43624355124/suppressing-tcp-rst-on-raw-sockets
+	ourPort := uint16(flagLocalport)
+	err = bindTCPPort(netip.AddrPortFrom(engine.Addr(), ourPort))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	rxBuf := make([]byte, iface.MTU*8)
 	retries := 5
-	ourPort := uint16(12345)
+
 	for retries > 0 {
 		retries--
 		slog.Info("dialing", slog.String("serveraddr", serverAddr.String()), slog.Uint64("our-port", uint64(ourPort)))
@@ -183,4 +209,20 @@ func main() {
 	}
 	os.Stderr.Write([]byte("failed to connect to server\n"))
 	os.Exit(1)
+}
+
+// This does not seem to be working.
+func bindTCPPort(addr netip.AddrPort) error {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err != nil {
+		return err
+	}
+	err = syscall.Bind(fd, &syscall.SockaddrInet4{
+		Port: int(addr.Port()),
+		Addr: addr.Addr().As4(),
+	})
+	if err != nil {
+		return err
+	}
+	return syscall.Listen(fd, 1)
 }

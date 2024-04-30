@@ -8,5 +8,11 @@ github.com/soypat/seqs v0.0.0-20240315041335-3dd1de606d2f h1:lONveayNmHEWUmDxfGn
 github.com/soypat/seqs v0.0.0-20240315041335-3dd1de606d2f/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
 github.com/soypat/seqs v0.0.0-20240421220819-60c7db9451e0 h1:BtFPCzuftncM7uAV8vgeVxJUupMoSmk9U5m8Xfihg7w=
 github.com/soypat/seqs v0.0.0-20240421220819-60c7db9451e0/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
+github.com/soypat/seqs v0.0.0-20240430134017-faa9181ca83c h1:7xSRMcEWCEAy/l9cF1EVkxV2eRzs5s9Ffk9LYOL5PbU=
+github.com/soypat/seqs v0.0.0-20240430134017-faa9181ca83c/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
+github.com/soypat/seqs v0.0.0-20240430135441-12f64aa609f2 h1:MHLNI3wsOsvzeyDfUwEJZzQ3eNfSUjajv+a46j6hKzs=
+github.com/soypat/seqs v0.0.0-20240430135441-12f64aa609f2/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
+github.com/soypat/seqs v0.0.0-20240430175138-8b6dcdb5a416 h1:fN5nKTixCj/Nhmrh+DZd86AJXFqXsvWh52vfT9452HQ=
+github.com/soypat/seqs v0.0.0-20240430175138-8b6dcdb5a416/go.mod h1:oCVCNGCHMKoBj97Zp9znLbQ1nHxpkmOY9X+UAGzOxc8=
 golang.org/x/sys v0.17.0 h1:25cE3gD+tdBA7lp7QfhuV+rJiE9YXTcS3VG1SqssI/Y=
 golang.org/x/sys v0.17.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=

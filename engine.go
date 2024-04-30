@@ -291,11 +291,15 @@ func (e *Engine) HandlePoll() (received, sent int, err error) {
 }
 
 func (e *Engine) startDHCP(cfg stacks.DHCPRequestConfig) error {
-	if !e.dhcpc.Offer().IsValid() {
+	if e.dhcpc.LocalPort() == 0 {
 		// Initialize DHCP client if not already done.
 		dhcpClient := stacks.NewDHCPClient(&e.s, dhcp.DefaultClientPort)
 		e.dhcpc = *dhcpClient
+	} else if e.dhcpc.State() != dhcp.StateInit {
+		e.dhcpc.Abort()
+		return errors.New("dhcp client not in init state, aborted")
 	}
+
 	// Perform DHCP request.
 	dhcpc := &e.dhcpc
 	err := dhcpc.BeginRequest(cfg)
@@ -326,11 +330,11 @@ func (e *Engine) waitDHCP(timeout time.Duration) error {
 	e.dhcpStart = time.Now()
 	deadline := e.dhcpStart.Add(timeout)
 	backoff := e.backoff()
-	for !dhcpc.IsDone() && time.Since(deadline) < 0 {
+	for dhcpc.State() != dhcp.StateBound && time.Since(deadline) < 0 {
 		backoff.Miss()
 	}
 	// close port.
-	if !dhcpc.IsDone() {
+	if dhcpc.State() != dhcp.StateBound {
 		e.dhcpStart = time.Time{}
 		return errors.New("DHCP did not complete")
 	}
